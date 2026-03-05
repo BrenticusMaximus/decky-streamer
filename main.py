@@ -104,6 +104,37 @@ def get_cmd_output(cmd, log=True):
     return (result.stdout + result.stderr).strip()
 
 
+def _coerce_int(value, current_value, setting_name, min_value=None, max_value=None):
+    """Convert setting values safely so bad payloads do not throw ValueError into Decky IPC."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid {setting_name} value: {value!r}; keeping {current_value}")
+        return current_value
+    if min_value is not None and parsed < min_value:
+        logger.warning(f"{setting_name} below min ({parsed} < {min_value}); clamping")
+        parsed = min_value
+    if max_value is not None and parsed > max_value:
+        logger.warning(f"{setting_name} above max ({parsed} > {max_value}); clamping")
+        parsed = max_value
+    return parsed
+
+
+def _coerce_float(value, current_value, setting_name, min_value=None, max_value=None):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid {setting_name} value: {value!r}; keeping {current_value}")
+        return current_value
+    if min_value is not None and parsed < min_value:
+        logger.warning(f"{setting_name} below min ({parsed} < {min_value}); clamping")
+        parsed = min_value
+    if max_value is not None and parsed > max_value:
+        logger.warning(f"{setting_name} above max ({parsed} > {max_value}); clamping")
+        parsed = max_value
+    return parsed
+
+
 def unload_pa_modules(search_string):
     module_list = get_cmd_output(f"pactl list short modules | grep '{search_string}' | awk '{{print $1}}'").split("\n")
     for module_id in module_list:
@@ -585,6 +616,10 @@ class Plugin:
 
             encoder = "vaapih264enc"
             encoder_opts = f"bitrate={self._videoBitrate}"
+            if _gst_element_has_property("vaapih264enc", "rate-control"):
+                encoder_opts += " rate-control=cbr"
+            if _gst_element_has_property("vaapih264enc", "aud"):
+                encoder_opts += " aud=true"
             if self._keyframeInterval > 0:
                 encoder_opts += f" keyframe-period={self._keyframeInterval}"
             if self._bframes > 0:
@@ -612,6 +647,15 @@ class Plugin:
             if capture_backend == "ximagesrc":
                 video_source = "ximagesrc use-damage=0 show-pointer=false do-timestamp=true"
 
+            mux_props = "flvmux name=mux streamable=true "
+            if _gst_element_has_property("flvmux", "enforce-increasing-timestamps"):
+                mux_props += "enforce-increasing-timestamps=true "
+            if _gst_element_has_property("flvmux", "skip-backwards-streams"):
+                mux_props += "skip-backwards-streams=true "
+            if _gst_element_has_property("flvmux", "latency"):
+                # flvmux aggregator may require >200ms to align audio/video clocks.
+                mux_props += "latency=300000000 "
+
             if scale_caps:
                 video_pipeline = (
                     f"{video_source} ! "
@@ -621,9 +665,8 @@ class Plugin:
                     f"h264parse config-interval=1 ! "
                     f"queue max-size-buffers=120 max-size-bytes=0 max-size-time=0 ! "
                     f"{'h264timestamper ! ' if _gst_has_element('h264timestamper') else ''}"
-                    f"flvmux name=mux streamable=true "
-                    f"{'enforce-increasing-timestamps=true ' if _gst_element_has_property('flvmux', 'enforce-increasing-timestamps') else ''}"
-                    f"{'skip-backwards-streams=true ' if _gst_element_has_property('flvmux', 'skip-backwards-streams') else ''}"
+                    f"{mux_props}"
+                    f"! queue max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0 "
                     f"! rtmpsink location=\"{rtmp_full_url}\" sync=false async=false"
                 )
             else:
@@ -635,9 +678,8 @@ class Plugin:
                     f"h264parse config-interval=1 ! "
                     f"queue max-size-buffers=120 max-size-bytes=0 max-size-time=0 ! "
                     f"{'h264timestamper ! ' if _gst_has_element('h264timestamper') else ''}"
-                    f"flvmux name=mux streamable=true "
-                    f"{'enforce-increasing-timestamps=true ' if _gst_element_has_property('flvmux', 'enforce-increasing-timestamps') else ''}"
-                    f"{'skip-backwards-streams=true ' if _gst_element_has_property('flvmux', 'skip-backwards-streams') else ''}"
+                    f"{mux_props}"
+                    f"! queue max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0 "
                     f"! rtmpsink location=\"{rtmp_full_url}\" sync=false async=false"
                 )
 
@@ -662,8 +704,8 @@ class Plugin:
             audio_bitrate_bps = self._audioBitrate * 1000
             cmd = (
                 cmd
-                + f' pulsesrc device="{self._deckySinkModuleName}.monitor" ! '
-                + f'audio/x-raw,channels=2 ! audioconvert ! '
+                + f' pulsesrc device="{self._deckySinkModuleName}.monitor" provide-clock=false do-timestamp=true buffer-time=500000 latency-time=30000 ! '
+                + f'audio/x-raw,channels=2 ! queue max-size-time=300000000 max-size-buffers=0 max-size-bytes=0 ! audioconvert ! '
                 + f'avenc_aac bitrate={audio_bitrate_bps} ! '
                 + f'mux.'
             )
@@ -952,7 +994,7 @@ class Plugin:
         return self._micGain
 
     async def update_mic_gain(self, new_gain: float):
-        self._micGain = float(new_gain)
+        self._micGain = _coerce_float(new_gain, self._micGain, "mic_gain", min_value=-60.0, max_value=30.0)
         if await Plugin.is_streaming(self):
             if await Plugin.is_mic_attached(self):
                 get_cmd_output(f"pactl set-source-volume Echo-Cancelled-Mic {self._micGain}db")
@@ -965,7 +1007,9 @@ class Plugin:
         return self._noiseReductionPercent
 
     async def update_noise_reduction_percent(self, new_percent: int):
-        self._noiseReductionPercent = int(new_percent)
+        self._noiseReductionPercent = _coerce_int(
+            new_percent, self._noiseReductionPercent, "noise_reduction_percent", min_value=0, max_value=100
+        )
         if await Plugin.is_streaming(self):
             if await Plugin.is_mic_enabled(self):
                 await Plugin.detach_mic(self)
@@ -1035,14 +1079,14 @@ class Plugin:
         return self._videoBitrate
 
     async def set_video_bitrate(self, bitrate: int):
-        self._videoBitrate = int(bitrate)
+        self._videoBitrate = _coerce_int(bitrate, self._videoBitrate, "video_bitrate", min_value=500, max_value=20000)
         await Plugin.saveConfig(self)
 
     async def get_audio_bitrate(self):
         return self._audioBitrate
 
     async def set_audio_bitrate(self, bitrate: int):
-        self._audioBitrate = int(bitrate)
+        self._audioBitrate = _coerce_int(bitrate, self._audioBitrate, "audio_bitrate", min_value=32, max_value=320)
         await Plugin.saveConfig(self)
 
     async def get_resolution(self):
@@ -1061,21 +1105,21 @@ class Plugin:
         return self._framerate
 
     async def set_framerate(self, framerate: int):
-        self._framerate = int(framerate)
+        self._framerate = _coerce_int(framerate, self._framerate, "framerate", min_value=1, max_value=60)
         await Plugin.saveConfig(self)
 
     async def get_keyframe_interval(self):
         return self._keyframeInterval
 
     async def set_keyframe_interval(self, interval: int):
-        self._keyframeInterval = int(interval)
+        self._keyframeInterval = _coerce_int(interval, self._keyframeInterval, "keyframe_interval", min_value=0, max_value=300)
         await Plugin.saveConfig(self)
 
     async def get_bframes(self):
         return self._bframes
 
     async def set_bframes(self, bframes: int):
-        self._bframes = int(bframes)
+        self._bframes = _coerce_int(bframes, self._bframes, "bframes", min_value=0, max_value=4)
         await Plugin.saveConfig(self)
 
     # Config management
