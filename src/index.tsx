@@ -150,7 +150,6 @@ const DeckyStreamer: VFC<{ serverAPI: ServerAPI, logic: DeckyStreamerLogic }> = 
   const [selectedResolution, setSelectedResolution] = useState("720p");
   const [selectedAudioBitrate, setSelectedAudioBitrate] = useState(160);
   const [selectedFramerate, setSelectedFramerate] = useState(60);
-  const [hideQuickAccessOverlay, setHideQuickAccessOverlay] = useState(false);
 
   // Advanced settings
   const [keyframeInterval, setKeyframeInterval] = useState(0);
@@ -239,9 +238,6 @@ const DeckyStreamer: VFC<{ serverAPI: ServerAPI, logic: DeckyStreamerLogic }> = 
       // Ensure it's a valid option
       const validFramerates = [30, 60];
       setSelectedFramerate(validFramerates.includes(framerateResult) ? framerateResult : 60);
-
-      const getHideQamOverlay = await serverAPI.callPluginMethod('get_hide_quick_access_overlay', {});
-      setHideQuickAccessOverlay(getHideQamOverlay.result === true);
 
       // Load advanced settings
       const getKeyframeInterval = await serverAPI.callPluginMethod('get_keyframe_interval', {});
@@ -596,23 +592,6 @@ const DeckyStreamer: VFC<{ serverAPI: ServerAPI, logic: DeckyStreamerLogic }> = 
         <PanelSectionRow>
           <div style={{ fontSize: '12px', color: '#888' }}>
             Output framerate for stream
-          </div>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ToggleField
-            label="Hide Quick Access Menu"
-            checked={hideQuickAccessOverlay}
-            disabled={isStreaming}
-            onChange={(enabled) => {
-              setHideQuickAccessOverlay(enabled);
-              serverAPI.callPluginMethod('set_hide_quick_access_overlay', { enabled });
-            }}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={{ fontSize: '12px', color: '#888' }}>
-            Captures only the game window so the ... menu and plugin panel are not shown on stream
           </div>
         </PanelSectionRow>
 
