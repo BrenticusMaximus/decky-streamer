@@ -330,6 +330,32 @@ def detect_display_resolution():
     return {"width": 1280, "height": 800, "display": "default"}
 
 
+def detect_game_window_xid(display: str):
+    """Find a visible game window on the target display for ximagesrc window capture."""
+    env = os.environ.copy()
+    env.pop('LD_LIBRARY_PATH', None)
+    env.pop('LD_PRELOAD', None)
+    env['DISPLAY'] = display
+    search_cmds = [
+        "xdotool search --onlyvisible --class 'steam_app_.*' | head -n 1",
+        "xdotool search --onlyvisible --classname 'steam_app_.*' | head -n 1",
+    ]
+    for cmd in search_cmds:
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, env=env, timeout=2
+            )
+            candidate = (result.stdout or "").strip().splitlines()
+            if not candidate:
+                continue
+            xid = candidate[0].strip()
+            if xid.isdigit():
+                return xid
+        except Exception as e:
+            logger.debug(f"Game window search failed on {display}: {e}")
+    return ""
+
+
 class Plugin:
     _streaming_process = None
     _platform: str = "twitch"  # twitch, youtube, kick, facebook, custom
@@ -372,6 +398,7 @@ class Plugin:
     _user_requested_stop: bool = False
     _recovery_pending: bool = False
     _capture_backend_preference: str = "pipewire"  # pipewire | ximagesrc
+    _hideQuickAccessOverlay: bool = False
     _recovery_attempts: int = 0
     _reconnect_active: bool = False
     _reconnect_started_at: float = 0.0
@@ -577,6 +604,7 @@ class Plugin:
                 "stream_key_len": len(self._streamKey or ""),
                 "custom_url": safe_custom,
                 "effective_url": safe_url,
+                "hide_qam_overlay": self._hideQuickAccessOverlay,
             }
             logger.info(
                 f"[stream:{self._stream_session_id}] start config: {json.dumps(stream_config, sort_keys=True)}"
@@ -596,6 +624,18 @@ class Plugin:
             video_bitrate_bps = self._videoBitrate * 1000
 
             capture_backend = self._capture_backend_preference
+            game_window_xid = ""
+            if self._hideQuickAccessOverlay:
+                capture_backend = "ximagesrc"
+                game_window_xid = detect_game_window_xid(display_to_use)
+                if game_window_xid:
+                    logger.info(
+                        f"[stream:{self._stream_session_id}] overlay-hide enabled; capturing game xid={game_window_xid}"
+                    )
+                else:
+                    logger.warning(
+                        f"[stream:{self._stream_session_id}] overlay-hide enabled but no game window found on {display_to_use}; using full-display ximagesrc"
+                    )
             logger.info(f"Using {capture_backend} for video capture")
             
             start_command = (
@@ -645,7 +685,10 @@ class Plugin:
             
             video_source = "pipewiresrc do-timestamp=true"
             if capture_backend == "ximagesrc":
-                video_source = "ximagesrc use-damage=0 show-pointer=false do-timestamp=true"
+                if game_window_xid:
+                    video_source = f"ximagesrc xid={game_window_xid} use-damage=0 show-pointer=false do-timestamp=true"
+                else:
+                    video_source = "ximagesrc use-damage=0 show-pointer=false do-timestamp=true"
 
             mux_props = "flvmux name=mux streamable=true "
             if _gst_element_has_property("flvmux", "enforce-increasing-timestamps"):
@@ -1108,6 +1151,13 @@ class Plugin:
         self._framerate = _coerce_int(framerate, self._framerate, "framerate", min_value=1, max_value=60)
         await Plugin.saveConfig(self)
 
+    async def get_hide_quick_access_overlay(self):
+        return self._hideQuickAccessOverlay
+
+    async def set_hide_quick_access_overlay(self, enabled: bool):
+        self._hideQuickAccessOverlay = bool(enabled)
+        await Plugin.saveConfig(self)
+
     async def get_keyframe_interval(self):
         return self._keyframeInterval
 
@@ -1137,6 +1187,7 @@ class Plugin:
         self._framerate = self._settings.getSetting("framerate", 60)
         self._keyframeInterval = self._settings.getSetting("keyframe_interval", 0)
         self._bframes = self._settings.getSetting("bframes", 0)
+        self._hideQuickAccessOverlay = self._settings.getSetting("hide_quick_access_overlay", False)
         self._micEnabled = self._settings.getSetting("mic_enabled", False)
         self._micGain = self._settings.getSetting("mic_gain", 13.0)
         self._noiseReductionPercent = self._settings.getSetting("noise_reduction_percent", 50)
@@ -1154,6 +1205,7 @@ class Plugin:
         self._settings.setSetting("framerate", self._framerate)
         self._settings.setSetting("keyframe_interval", self._keyframeInterval)
         self._settings.setSetting("bframes", self._bframes)
+        self._settings.setSetting("hide_quick_access_overlay", self._hideQuickAccessOverlay)
         self._settings.setSetting("mic_enabled", self._micEnabled)
         self._settings.setSetting("mic_gain", self._micGain)
         self._settings.setSetting("noise_reduction_percent", self._noiseReductionPercent)
