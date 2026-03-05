@@ -612,7 +612,7 @@ const DeckyStreamer: VFC<{ serverAPI: ServerAPI, logic: DeckyStreamerLogic }> = 
         </PanelSectionRow>
         <PanelSectionRow>
           <div style={{ fontSize: '12px', color: '#888' }}>
-            Adds a privacy mask over the right-side Quick Access area while streaming
+            Captures only the game window so the ... menu and plugin panel are not shown on stream
           </div>
         </PanelSectionRow>
 
